@@ -2,135 +2,163 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --- 1. CONFIGURATION & TITLE ---
-st.set_page_config(page_title="Interactive CFD: Cavity Flow", layout="wide")
-st.title("🌊 Interactive 2D Lid-Driven Cavity Flow")
+st.set_page_config(page_title="Virtual Wind Tunnel", layout="wide")
+st.title("💨 Virtual Wind Tunnel: Lattice Boltzmann Demo")
 st.markdown("""
-This app simulates the **Navier-Stokes equations** for incompressible flow in a box. 
-The top lid moves to the right, driving the fluid and creating a vortex.
+This app simulates flow past an object using the **Lattice Boltzmann Method (LBM)**. 
+Unlike the previous lid-driven cavity, this is an **open flow** simulation (Wind Tunnel).
 """)
 
-# --- 2. SIDEBAR PARAMETERS ---
-st.sidebar.header("Simulation Parameters")
+# --- 1. CONFIGURATION ---
+st.sidebar.header("Wind Tunnel Settings")
 
-# Grid Size (nx, ny)
-nx = st.sidebar.slider("Grid Size (Resolution)", min_value=20, max_value=60, value=41, step=1, 
-                       help="Higher resolution is more accurate but slower.")
-ny = nx  # Keep domain square for simplicity
+# Resolution
+ny = st.sidebar.slider("Tunnel Height (Resolution)", 40, 100, 60)
+nx = st.sidebar.slider("Tunnel Length", 100, 400, 200)
 
-# Time Steps (nt)
-nt = st.sidebar.slider("Time Steps (Duration)", min_value=100, max_value=2000, value=500, step=100,
-                       help="How long the simulation runs.")
+# Physics
+viscosity = st.sidebar.slider("Viscosity", 0.005, 0.1, 0.02, format="%.3f")
+u_inlet = st.sidebar.slider("Inlet Wind Speed", 0.05, 0.2, 0.1)
+steps = st.sidebar.slider("Simulation Steps", 500, 5000, 1500)
 
-# Physical Properties
-nu = st.sidebar.slider("Viscosity (nu)", min_value=0.01, max_value=0.5, value=0.1, step=0.01,
-                       help="Thicker fluids (higher nu) flow more slowly.")
-rho = st.sidebar.number_input("Fluid Density (rho)", value=1.0)
+# Geometry Selection
+shape = st.sidebar.selectbox("Select Obstacle Shape", ["Cylinder", "Square", "Wall", "Airfoil (NACA0012)"])
 
-# Boundary Condition
-lid_vel = st.sidebar.slider("Lid Velocity", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+# --- 2. THE LBM SOLVER ---
+# D2Q9 Lattice Constants
+w = np.array([4/9, 1/9, 1/9, 1/9, 1/9, 1/36, 1/36, 1/36, 1/36])
+cx = np.array([0, 1, 0, -1, 0, 1, -1, -1, 1])
+cy = np.array([0, 0, 1, 0, -1, 1, 1, -1, -1])
+# Opposite directions for bounce-back
+opp = np.array([0, 3, 4, 1, 2, 7, 8, 5, 6])
 
-# Advanced Solver Settings
-nit = 50  # Iterations for pressure equation (kept constant for speed)
-dt = 0.001 
-dx = 2 / (nx - 1)
-dy = 2 / (ny - 1)
-
-# --- 3. THE SOLVER (Cached for Speed) ---
 @st.cache_data
-def solve_navier_stokes(nx, ny, nt, nit, rho, nu, dt, lid_vel):
-    # Initialize arrays
-    u = np.zeros((ny, nx))
-    v = np.zeros((ny, nx))
-    p = np.zeros((ny, nx)) 
-    b = np.zeros((ny, nx))
+def get_obstacle_mask(nx, ny, shape):
+    """Generates a boolean mask for the obstacle."""
+    mask = np.full((ny, nx), False)
+    cx, cy = nx // 4, ny // 2  # Center of obstacle
     
-    # Time Stepping Loop
-    for n in range(nt):
-        un = u.copy()
-        vn = v.copy()
+    if shape == "Cylinder":
+        r = ny // 9
+        y, x = np.ogrid[:ny, :nx]
+        mask = (x - cx)**2 + (y - cy)**2 < r**2
+
+    elif shape == "Square":
+        r = ny // 9
+        mask[cy-r:cy+r, cx-r:cx+r] = True
         
-        # Source term for Pressure Poisson
-        b[1:-1, 1:-1] = (rho * (1 / dt * ((u[1:-1, 2:] - u[1:-1, 0:-2]) / (2 * dx) + 
-                         (v[2:, 1:-1] - v[0:-2, 1:-1]) / (2 * dy)) -
-                        ((u[1:-1, 2:] - u[1:-1, 0:-2]) / (2 * dx))**2 -
-                        2 * ((u[2:, 1:-1] - u[0:-2, 1:-1]) / (2 * dy) *
-                             (v[1:-1, 2:] - v[1:-1, 0:-2]) / (2 * dx)) -
-                        ((v[2:, 1:-1] - v[0:-2, 1:-1]) / (2 * dy))**2))
+    elif shape == "Wall":
+        mask[cy:cy+5, cx-10:cx+10] = True
         
-        # Pressure Poisson Solver
-        for q in range(nit):
-            pn = p.copy()
-            p[1:-1, 1:-1] = (((pn[1:-1, 2:] + pn[1:-1, 0:-2]) * dy**2 + 
-                              (pn[2:, 1:-1] + pn[0:-2, 1:-1]) * dx**2) /
-                              (2 * (dx**2 + dy**2)) -
-                              dx**2 * dy**2 / (2 * (dx**2 + dy**2)) * b[1:-1, 1:-1])
+    elif shape == "Airfoil (NACA0012)":
+        # Simplified NACA0012 approximation
+        chord = ny // 3
+        for i in range(chord):
+            x_pos = cx - chord//2 + i
+            if 0 <= x_pos < nx:
+                # Thickness distribution
+                xu = i / chord
+                yt = 0.6 * (0.2969 * np.sqrt(xu) - 0.1260 * xu - 0.3516 * xu**2 + 0.2843 * xu**3 - 0.1015 * xu**4)
+                half_thick = int(yt * chord)
+                mask[cy-half_thick : cy+half_thick, x_pos] = True
 
-            # Pressure Boundary Conditions
-            p[:, -1] = p[:, -2] # dp/dx = 0 at x = 2
-            p[0, :] = p[1, :]   # dp/dy = 0 at y = 0
-            p[:, 0] = p[:, 1]   # dp/dx = 0 at x = 0
-            p[-1, :] = 0        # p = 0 at y = 2
+    return mask
+
+@st.cache_data
+def run_lbm(nx, ny, omega, u_in, steps, shape):
+    # Initialize
+    obstacle = get_obstacle_mask(nx, ny, shape)
+    
+    # Initial macroscopic variables
+    vel = np.zeros((2, ny, nx))
+    vel[0, :, :] = u_in * (1 + 1e-4 * np.sin(np.linspace(0, 4*np.pi, ny))[:, np.newaxis]) # Small perturbation
+    rho = np.ones((ny, nx))
+    
+    # Initial distributions (equilibrium)
+    f = np.zeros((9, ny, nx))
+    for i in range(9):
+        cu = 3 * (cx[i]*vel[0] + cy[i]*vel[1])
+        f[i] = rho * w[i] * (1 + cu + 0.5*cu**2 - 1.5*(vel[0]**2 + vel[1]**2))
+    
+    # Main Loop
+    for _ in range(steps):
+        # 1. Macroscopic variables
+        rho = np.sum(f, axis=0)
+        vel[0] = np.sum(f * cx[:, np.newaxis, np.newaxis], axis=0) / rho
+        vel[1] = np.sum(f * cy[:, np.newaxis, np.newaxis], axis=0) / rho
         
-        # Velocity Updates
-        u[1:-1, 1:-1] = (un[1:-1, 1:-1]-
-                         un[1:-1, 1:-1] * dt / dx *
-                        (un[1:-1, 1:-1] - un[1:-1, 0:-2]) -
-                         vn[1:-1, 1:-1] * dt / dy *
-                        (un[1:-1, 1:-1] - un[0:-2, 1:-1]) -
-                         dt / (2 * rho * dx) * (p[1:-1, 2:] - p[1:-1, 0:-2]) +
-                         nu * (dt / dx**2 *
-                        (un[1:-1, 2:] - 2 * un[1:-1, 1:-1] + un[1:-1, 0:-2]) +
-                         dt / dy**2 *
-                        (un[2:, 1:-1] - 2 * un[1:-1, 1:-1] + un[0:-2, 1:-1])))
-
-        v[1:-1, 1:-1] = (vn[1:-1, 1:-1] -
-                         un[1:-1, 1:-1] * dt / dx *
-                        (vn[1:-1, 1:-1] - vn[1:-1, 0:-2]) -
-                         vn[1:-1, 1:-1] * dt / dy *
-                        (vn[1:-1, 1:-1] - vn[0:-2, 1:-1]) -
-                         dt / (2 * rho * dy) * (p[2:, 1:-1] - p[0:-2, 1:-1]) +
-                         nu * (dt / dx**2 *
-                        (vn[1:-1, 2:] - 2 * vn[1:-1, 1:-1] + vn[1:-1, 0:-2]) +
-                         dt / dy**2 *
-                        (vn[2:, 1:-1] - 2 * vn[1:-1, 1:-1] + vn[0:-2, 1:-1])))
-
-        # Velocity Boundary Conditions
-        u[0, :]  = 0
-        u[:, 0]  = 0
-        u[:, -1] = 0
-        u[-1, :] = lid_vel  # Apply Lid Velocity
-        v[0, :]  = 0
-        v[-1, :] = 0
-        v[:, 0]  = 0
-        v[:, -1] = 0
+        # Force Inlet/Outlet (Zou/He simplified)
+        vel[0, :, 0] = u_in
+        vel[1, :, 0] = 0
+        rho[:, 0] = 1 / (1 - u_in) * (np.sum(f[[0, 2, 4], :, 0], axis=0) + 2*np.sum(f[[3, 6, 7], :, 0], axis=0))
         
-    return u, v, p
+        # 2. Collision (BGK)
+        feq = np.zeros_like(f)
+        for i in range(9):
+            cu = 3 * (cx[i]*vel[0] + cy[i]*vel[1])
+            feq[i] = rho * w[i] * (1 + cu + 0.5*cu**2 - 1.5*(vel[0]**2 + vel[1]**2))
+        
+        f = f * (1 - omega) + feq * omega
+        
+        # 3. Streaming (Propagate)
+        for i in range(9):
+            f[i] = np.roll(f[i], cx[i], axis=1)
+            f[i] = np.roll(f[i], cy[i], axis=0)
+            
+        # 4. Boundary Conditions (Bounce-back)
+        # Find cells that streamed *into* obstacle
+        bounced = f[:, obstacle]
+        # Reflect them back to where they came from (swap directions)
+        for i in range(9):
+             f[opp[i], obstacle] = bounced[i]
+             
+    # Calculate final speed and vorticity for plotting
+    speed = np.sqrt(vel[0]**2 + vel[1]**2)
+    
+    # Simple vorticity calc (curl)
+    vorticity = (np.roll(vel[1], -1, axis=1) - np.roll(vel[1], 1, axis=1)) - \
+                (np.roll(vel[0], -1, axis=0) - np.roll(vel[0], 1, axis=0))
+    
+    # Mask obstacle in output
+    speed[obstacle] = np.nan
+    vorticity[obstacle] = np.nan
+    
+    return speed, vorticity, obstacle
 
-# --- 4. RUN SIMULATION ---
-with st.spinner(f"Simulating {nt} time steps..."):
-    u, v, p = solve_navier_stokes(nx, ny, nt, nit, rho, nu, dt, lid_vel)
+# --- 3. RUN SIMULATION ---
+# Calculate relaxation parameter (omega) from viscosity
+# viscosity = (1/3) * (1/omega - 0.5)
+omega = 1.0 / (3.0 * viscosity + 0.5)
 
-# --- 5. VISUALIZATION ---
-st.subheader(f"Results (Re = {lid_vel * 2 / nu:.1f})")
+if omega >= 2.0:
+    st.error("Viscosity too low! Simulation will be unstable. Increase Viscosity.")
+else:
+    with st.spinner(f"Simulating {shape} in Wind Tunnel..."):
+        speed, vorticity, mask = run_lbm(nx, ny, omega, u_inlet, steps, shape)
 
-# Coordinate mesh for plotting
-x = np.linspace(0, 2, nx)
-y = np.linspace(0, 2, ny)
-X, Y = np.meshgrid(x, y)
+    # --- 4. VISUALIZATION ---
+    st.subheader(f"Flow Results")
+    
+    col1, col2 = st.columns(2)
+    
+    # Plot 1: Velocity Magnitude
+    with col1:
+        fig1, ax1 = plt.subplots(figsize=(8, 4))
+        im1 = ax1.imshow(speed, cmap='turbo', origin='lower')
+        # Overlay obstacle
+        ax1.imshow(mask, cmap='binary', alpha=0.5, origin='lower', interpolation='nearest')
+        ax1.set_title("Velocity Magnitude")
+        plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+        ax1.axis('off')
+        st.pyplot(fig1)
 
-fig, ax = plt.subplots(figsize=(10, 6))
-
-# Pressure contour
-contour = ax.contourf(X, Y, p, alpha=0.5, cmap='viridis', levels=20)
-fig.colorbar(contour, ax=ax, label='Pressure')
-
-# Velocity Streamlines
-speed = np.sqrt(u**2 + v**2)
-ax.streamplot(X, Y, u, v, color='k', density=1.5, linewidth=1, arrowsize=1)
-
-ax.set_xlabel('X')
-ax.set_ylabel('Y')
-ax.set_title(f'Velocity Streamlines & Pressure Field')
-
-st.pyplot(fig)
+    # Plot 2: Vorticity (Curl)
+    with col2:
+        fig2, ax2 = plt.subplots(figsize=(8, 4))
+        # Use a divergent colormap for vorticity (red=clockwise, blue=counter-clockwise)
+        im2 = ax2.imshow(vorticity, cmap='seismic', origin='lower', vmin=-0.1, vmax=0.1)
+        ax2.imshow(mask, cmap='gray', alpha=0.5, origin='lower')
+        ax2.set_title("Vorticity (Turbulence/Wake)")
+        plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+        ax2.axis('off')
+        st.pyplot(fig2)
