@@ -44,7 +44,7 @@ st.markdown(
 st.markdown("""
 Upload an image or choose a shape to test its aerodynamics.  
 
-Use the **Rotation Controls** in the sidebar to rotate the object and set its **angle of attack** relative to the incoming flow.
+For **Custom Image Uploads**, use the **Rotation Controls** in the sidebar to rotate the object and set its **angle of attack** relative to the incoming flow.
 A positive angle tilts the leading edge upward into the wind, while a negative angle tilts it downward.
 """)
 
@@ -82,7 +82,7 @@ threshold = 128
 
 if shape == "Custom Image Upload":
     st.sidebar.markdown("---")
-    st.sidebar.subheader("Object Configuration")
+    st.sidebar.subheader("Object Configuration & Rotation Controls")
     
     # 1. Image Upload
     uploaded_file = st.sidebar.file_uploader("Upload Image (jpg, png)", type=['png', 'jpg', 'jpeg'])
